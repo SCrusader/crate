@@ -65,15 +65,18 @@ class HashJoin extends TwoInputPlan {
     private final TableStats tableStats;
     @VisibleForTesting
     final AnalyzedRelation concreteRelation;
+    private final boolean isFiltered;
 
     HashJoin(LogicalPlan lhs,
              LogicalPlan rhs,
              Symbol joinCondition,
+             boolean isFiltered,
              AnalyzedRelation concreteRelation,
              TableStats tableStats) {
         super(lhs, rhs, new ArrayList<>());
         this.concreteRelation = concreteRelation;
         this.joinCondition = joinCondition;
+        this.isFiltered = isFiltered;
         this.outputs.addAll(lhs.outputs());
         this.outputs.addAll(rhs.outputs());
         this.tableStats = tableStats;
@@ -131,7 +134,7 @@ class HashJoin extends TwoInputPlan {
 
         boolean hasDocTables = baseTables.stream().anyMatch(r -> r instanceof DocTableRelation);
         boolean isDistributed =
-            hasDocTables && (!leftResultDesc.nodeIds().isEmpty() && !rightResultDesc.nodeIds().isEmpty());
+            hasDocTables && isFiltered && (!leftResultDesc.nodeIds().isEmpty() && !rightResultDesc.nodeIds().isEmpty());
 
         Collection<String> joinExecutionNodes = ImmutableSet.of(plannerContext.handlerNode());
         MergePhase leftMerge = null;
@@ -141,6 +144,11 @@ class HashJoin extends TwoInputPlan {
             // always execute on the left side, the larger branch
             leftExecutionPlan.setDistributionInfo(DistributionInfo.DEFAULT_SAME_NODE);
             joinExecutionNodes = leftResultDesc.nodeIds();
+        } else {
+            leftExecutionPlan.setDistributionInfo(DistributionInfo.DEFAULT_BROADCAST);
+            if (JoinOperations.isMergePhaseNeeded(joinExecutionNodes, leftResultDesc, false)) {
+                leftMerge = JoinOperations.buildMergePhaseForJoin(plannerContext, leftResultDesc, joinExecutionNodes);
+            }
         }
 
         if (joinExecutionNodes.size() == 1
@@ -166,13 +174,13 @@ class HashJoin extends TwoInputPlan {
         // and must produce outputs that match the order of the original outputs, because a "parent" (eg. GROUP BY)
         // operator of the join expects the original outputs order.
         List<Symbol> projectionOutputs = InputColumns.create(
-                outputs,
-                new InputColumns.SourceSymbols(joinOutputs));
+            outputs,
+            new InputColumns.SourceSymbols(joinOutputs));
 
         HashJoinPhase joinPhase = new HashJoinPhase(
             plannerContext.jobId(),
             plannerContext.nextExecutionPhaseId(),
-            "hash-join",
+            isDistributed ? "distributed-hash-join" : "hash-join",
             // JoinPhase ctor wants at least one projection
             Collections.singletonList(new EvalProjection(projectionOutputs)),
             leftMerge,
@@ -223,7 +231,7 @@ class HashJoin extends TwoInputPlan {
 
     @Override
     protected LogicalPlan updateSources(LogicalPlan newLeftSource, LogicalPlan newRightSource) {
-        return new HashJoin(newLeftSource, newRightSource, joinCondition, concreteRelation, tableStats);
+        return new HashJoin(newLeftSource, newRightSource, joinCondition, isFiltered, concreteRelation, tableStats);
     }
 
     @Override

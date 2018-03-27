@@ -200,6 +200,7 @@ public class JoinPlanBuilder implements LogicalPlan.Builder {
                 lhsPlan,
                 rhsPlan,
                 joinCondition,
+                !query.symbolType().isValueSymbol(),
                 rhs,
                 tableStats);
         } else {
